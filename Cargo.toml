@@ -1,0 +1,58 @@
+[package]
+name = "mem-pick"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Сканер и редактор памяти процессов для Windows: поиск значений, отсев, таблица адресов и заморозка."
+authors = ["SchrodingerBox Softworks"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/SchrodingerBox-Softworks/mem-pick"
+homepage = "https://github.com/SchrodingerBox-Softworks/mem-pick"
+keywords = ["memory-scanner", "memory-editor", "windows", "egui", "trainer"]
+categories = ["gui", "os::windows-apis", "development-tools::debugging"]
+# Приложение, а не библиотека — на crates.io ему делать нечего.
+publish = false
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui_extras = { version = "0.35.0", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+global-hotkey = "0.6"
+quick-xml = "0.41"
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+# Релизный бинарь распространяется одним файлом, поэтому оптимизируем размер
+# и время старта: LTO + один codegen-unit + вырезанные символы.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# Поиск гоняет миллионы сравнений — без оптимизаций даже отладочная сборка
+# сканировала бы игру минутами.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

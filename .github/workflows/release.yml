@@ -1,0 +1,136 @@
+name: Release
+
+# Запускается ТОЛЬКО когда в репозиторий пушат тег вида `v1.2.3`.
+#
+# Заголовок и текст релиза берутся из аннотации тега, поэтому имя релиза
+# задаётся при создании тега:
+#
+#   git tag -a v0.1.0 -m "Первый релиз"
+#   git push origin v0.2.0
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: mem-pick
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Полная история + теги: нужны, чтобы прочитать аннотацию тега.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked --verbose
+
+      - name: Run tests
+        run: cargo test --release --locked --verbose
+
+      - name: Read tag annotation
+        id: tag
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          git for-each-ref "refs/tags/${TAG}" --format='%(contents)' > TAG_MESSAGE.txt
+          if [ ! -s TAG_MESSAGE.txt ] || ! grep -q '[^[:space:]]' TAG_MESSAGE.txt; then
+            git log -1 --format=%B "${TAG}" > TAG_MESSAGE.txt
+          fi
+          head -n 1 TAG_MESSAGE.txt > TAG_SUBJECT.txt
+          tail -n +2 TAG_MESSAGE.txt > TAG_BODY.txt
+          echo "subject=$(cat TAG_SUBJECT.txt)" >> "$GITHUB_OUTPUT"
+
+      # Кладём в архив папку целиком: распаковал — и получил готовый каталог
+      # с exe, инструкцией и лицензией, никаких файлов россыпью.
+      - name: Package artifacts
+        id: package
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $dir = "$env:BIN_NAME-$tag"
+          $asset = "$dir-x86_64-windows.zip"
+
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target/release/$env:BIN_NAME.exe" "$dir/"
+          Copy-Item LICENSE "$dir/LICENSE.txt"
+
+          # README.txt для Блокнота: CRLF и UTF-8 с BOM, иначе кириллица
+          # в старых версиях Windows читается кракозябрами.
+          # Читаем через .NET, а не Get-Content: тот без BOM в файле принимает
+          # UTF-8 за ANSI и портит кириллицу ещё на входе.
+          $src = (Resolve-Path packaging/README.txt).Path
+          $readme = [System.IO.File]::ReadAllText($src) -replace '__VERSION__', $tag
+          $readme = ($readme -replace "`r`n", "`n") -replace "`n", "`r`n"
+          $readmePath = Join-Path (Resolve-Path $dir).Path "README.txt"
+          [System.IO.File]::WriteAllText(
+            $readmePath, $readme, (New-Object System.Text.UTF8Encoding($true))
+          )
+
+          Compress-Archive -Path $dir -DestinationPath $asset -CompressionLevel Optimal
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+
+          "asset=$asset"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sha256=$hash"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-ChildItem $dir | Select-Object Name, Length
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          {
+            if grep -q '[^[:space:]]' TAG_BODY.txt; then
+              cat TAG_BODY.txt
+              echo
+            fi
+            echo "## Установка"
+            echo
+            echo "Скачайте \`${{ steps.package.outputs.asset }}\` и распакуйте — внутри готовая папка:"
+            echo
+            echo "\`\`\`"
+            echo "${{ github.event.repository.name }}-${{ github.ref_name }}\\"
+            echo "├─ mem-pick.exe"
+            echo "├─ README.txt"
+            echo "└─ LICENSE.txt"
+            echo "\`\`\`"
+            echo
+            echo "Положите папку туда, где есть право на запись, и запустите \`mem-pick.exe\` —"
+            echo "настройки и таблицы адресов появятся рядом с ним."
+            echo
+            echo "---"
+            echo
+            echo "**SHA256** (\`${{ steps.package.outputs.asset }}\`)"
+            echo
+            echo "\`\`\`"
+            echo "${{ steps.package.outputs.sha256 }}"
+            echo "\`\`\`"
+          } > RELEASE_BODY.md
+          cat RELEASE_BODY.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ github.ref_name }} — ${{ steps.tag.outputs.subject }}"
+          body_path: RELEASE_BODY.md
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: ${{ steps.package.outputs.asset }}
